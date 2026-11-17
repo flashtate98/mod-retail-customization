@@ -24,8 +24,23 @@ See the comment at the top of `src/RetailCustomization.cpp`. Client side: patch 
 ## Notes
 
 - Characters made before the module (or by stock clients) have no rows and show default choices.
-- Bots show default choices unless rows are added for them.
+- Random playerbots get a look at their first login (see Playerbots below); other bots show default choices.
 - Choice IDs are not checked against the DB2s on the server; the client drops any it does not offer.
+
+## Playerbots
+
+A random bot (an account whose name starts with `RetailCustomization.BotAccountPrefix`, `RNDBOT` by default)
+that has no stored choices is given one random choice per option of its race, sex and class at its first
+login. The choices are saved like a player's, so the bot keeps that look, and everyone nearby is sent it.
+Bots that already have choices are left alone; altbots (players' own characters) are never touched.
+
+The choices come from `retail_customization_bot_pool` in the world database
+(`data/sql/db-world/base/retail_customization_bot_pool.sql`). Fill it from the FlashWOW client: open the
+console, run `retailBotLooks`, and run the `Logs\retail_customization_bot_pool.sql` it writes on the world
+database. Run it again after changing the customization DB2s or the race map. The worldserver logs
+`>> Retail customization: N bot choices for M race, sex and class combinations loaded` at startup.
+
+Only the form a bot shows gets a look; a Worgen or Dracthyr bot's other form keeps its defaults.
 
 ## Two Forms (FlashWOW)
 

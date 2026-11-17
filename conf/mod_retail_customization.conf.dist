@@ -14,6 +14,26 @@
 RetailCustomization.Enable = 1
 
 #
+#    RetailCustomization.BotLooks
+#        Description: Give each random playerbot without stored choices a random Retail look at its first
+#                     login, from retail_customization_bot_pool (world database; written by the FlashWOW
+#                     client's console command retailBotLooks). The look is saved and kept.
+#        Default:     1 - Enabled
+#                     0 - Disabled (bots show default choices)
+#
+
+RetailCustomization.BotLooks = 1
+
+#
+#    RetailCustomization.BotAccountPrefix
+#        Description: Accounts whose name starts with this (any case) are random bot accounts. Match
+#                     mod-playerbots' Playerbots.RandomBotAccountPrefix.
+#        Default:     "RNDBOT"
+#
+
+RetailCustomization.BotAccountPrefix = "RNDBOT"
+
+#
 #    TwoForms.ToggleSpell
 #        Description: Comma-separated spells that change a player between its race's own and altered forms
 #                     (Worgen: Two Forms; Dracthyr: Visage). Each form keeps its own look. Not usable in

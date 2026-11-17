@@ -32,8 +32,13 @@
  * UNIT_FLAG2_ALTERED_FORM, which tells every client to draw the altered form's race. The form is
  * changed by casting TwoForms.ToggleSpell (not in combat); TwoForms.NativeFormSpells return a player
  * to the race's own form (Darkflight, Running Wild).
+ *
+ * Playerbots: a random bot (an account named with RetailCustomization.BotAccountPrefix) that has no stored
+ * choices is given a look at its first login, one random choice per option from retail_customization_bot_pool
+ * (world database, written by the FlashWOW client's retailBotLooks command), and keeps it from then on.
  */
 
+#include "AccountMgr.h"
 #include "Chat.h"
 #include "Config.h"
 #include "Spell.h"
@@ -44,14 +49,17 @@
 #include "DatabaseEnv.h"
 #include "Log.h"
 #include "Player.h"
+#include "Random.h"
 #include "ScriptMgr.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <mutex>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -130,6 +138,40 @@ namespace
     std::map<uint32, uint32> s_raceFormSpells;                // race -> its toggle spell, taught at login
     std::set<uint32> s_nativeFormSpells;
 
+    // Playerbots: the choices a race, sex and class may take, by option (retail_customization_bot_pool).
+    bool s_botLooks = true;
+    std::string s_botAccountPrefix = "RNDBOT";
+    using Pool = std::vector<std::pair<uint32, std::vector<uint32>>>;
+    std::unordered_map<uint32, Pool> s_botPool;
+    std::unordered_map<uint32, bool> s_botAccounts;          // account -> is a random bot account
+
+    uint32 PoolKey(uint32 race, uint32 sex, uint32 cls)
+    {
+        return (race << 16) | (sex << 8) | cls;
+    }
+
+    // A random bot: logged in without a client, on an account named with the bot prefix (asked once per account).
+    bool IsRandomBot(Player* player)
+    {
+        WorldSession* session = player->GetSession();
+        if (!session || !session->IsSocketClosed() || s_botAccountPrefix.empty())
+            return false;
+        uint32 const account = session->GetAccountId();
+        {
+            std::lock_guard<std::mutex> lock(s_mutex);
+            auto const known = s_botAccounts.find(account);
+            if (known != s_botAccounts.end())
+                return known->second;
+        }
+        std::string name;
+        bool const bot = AccountMgr::GetName(account, name) && name.size() >= s_botAccountPrefix.size() &&
+            std::equal(s_botAccountPrefix.begin(), s_botAccountPrefix.end(), name.begin(),
+                [](char a, char b) { return std::toupper(static_cast<unsigned char>(a)) == std::toupper(static_cast<unsigned char>(b)); });
+        std::lock_guard<std::mutex> lock(s_mutex);
+        s_botAccounts[account] = bot;
+        return bot;
+    }
+
     // Reads the trailing RTLC block at the packet's read position. False when there is none or it
     // is malformed (the stock data is left alone either way).
     bool ReadBlock(WorldPacket& packet, Choices& choices)
@@ -179,6 +221,33 @@ namespace
         data << uint16(1);
         PutEntry(data, ObjectGuid::Create<HighGuid::Player>(low).GetRawValue(), &choices, form);
         return data;
+    }
+
+    // Playerbots: a random bot without stored choices gets one random choice per option of its race, sex and class,
+    // saved like a player's and shown to everyone nearby.
+    void RollBotLook(Player* player)
+    {
+        if (!s_botLooks || !IsRandomBot(player))
+            return;
+        ObjectGuid::LowType const low = player->GetGUID().GetCounter();
+        Choices choices;
+        {
+            std::lock_guard<std::mutex> lock(s_mutex);
+            if (s_stored.count(low))
+                return;
+            auto const pool = s_botPool.find(PoolKey(player->getRace(), player->getGender(), player->getClass()));
+            if (pool == s_botPool.end())
+                return;
+            for (auto const& [option, list] : pool->second)
+                if (!list.empty())
+                    choices[option] = list[urand(0, uint32(list.size() - 1))];
+        }
+        if (choices.empty())
+            return;
+        Save(low, player->GetSession()->GetAccountId(), choices);
+        WorldPacket data = ChoicesPacket(low, choices);
+        player->SendMessageToSet(&data, true);
+        LOG_DEBUG("module", "Retail customization: bot {} given {} choices", player->GetName(), choices.size());
     }
 
     // All stored choices of the account's characters, and the form of those in their altered form, for the
@@ -380,6 +449,12 @@ public:
     void OnAfterConfigLoad(bool /*reload*/) override
     {
         s_enabled = sConfigMgr->GetOption<bool>("RetailCustomization.Enable", true);
+        s_botLooks = sConfigMgr->GetOption<bool>("RetailCustomization.BotLooks", true);
+        {
+            std::lock_guard<std::mutex> lock(s_mutex);
+            s_botAccountPrefix = sConfigMgr->GetOption<std::string>("RetailCustomization.BotAccountPrefix", "RNDBOT");
+            s_botAccounts.clear();
+        }
         s_toggleSpells.clear();
         std::string const toggleSpells = sConfigMgr->GetOption<std::string>("TwoForms.ToggleSpell", "");
         for (std::string_view id : Acore::Tokenize(toggleSpells, ',', false))
@@ -459,6 +534,25 @@ public:
             } while (result->NextRow());
         }
         LOG_INFO("module", ">> Two Forms: {} characters with a second form loaded", s_forms.size());
+
+        s_botPool.clear();
+        result = WorldDatabase.Query("SELECT `race`, `sex`, `class`, `option_id`, `choice_id` FROM `retail_customization_bot_pool` "
+            "ORDER BY `race`, `sex`, `class`, `option_id`");
+        rows = 0;
+        if (result)
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                Pool& pool = s_botPool[PoolKey(fields[0].Get<uint8>(), fields[1].Get<uint8>(), fields[2].Get<uint8>())];
+                uint32 const option = fields[3].Get<uint32>();
+                if (pool.empty() || pool.back().first != option)
+                    pool.emplace_back(option, std::vector<uint32>());
+                pool.back().second.push_back(fields[4].Get<uint32>());
+                ++rows;
+            } while (result->NextRow());
+        }
+        LOG_INFO("module", ">> Retail customization: {} bot choices for {} race, sex and class combinations loaded", rows, s_botPool.size());
     }
 };
 
@@ -564,10 +658,14 @@ public:
         LOG_INFO("module", "Two Forms: {} saved with its other form's look", player->GetName());
     }
 
-    // Two Forms: a character saved in its altered form logs in showing it.
+    // Playerbots: a random bot's first login gives it a look. Two Forms: a character saved in its altered form
+    // logs in showing it.
     void OnPlayerLogin(Player* player) override
     {
-        if (!s_enabled || !AlteredFormRace(player->getRace()))
+        if (!s_enabled)
+            return;
+        RollBotLook(player);
+        if (!AlteredFormRace(player->getRace()))
             return;
         auto const known = s_raceFormSpells.find(player->getRace());
         if (known != s_raceFormSpells.end() && !player->HasSpell(known->second) && sSpellMgr->GetSpellInfo(known->second))
