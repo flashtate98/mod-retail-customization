@@ -1,0 +1,63 @@
+[worldserver]
+
+########################################
+# mod-retail-customization
+########################################
+#
+#    RetailCustomization.Enable
+#        Description: Store the Retail customization choices FlashWOW clients send with new characters
+#                     (and barber shop visits) and share them with every client that shows them.
+#        Default:     1 - Enabled
+#                     0 - Disabled (the stock fields still work; the extra choices are ignored)
+#
+
+RetailCustomization.Enable = 1
+
+#
+#    TwoForms.ToggleSpell
+#        Description: Comma-separated spells that change a player between its race's own and altered forms
+#                     (Worgen: Two Forms; Dracthyr: Visage). Each form keeps its own look. Not usable in
+#                     combat. Needs patch acore_two_forms.patch and the form races' data (Gilnean 54,
+#                     Dracthyr Visage 55) on client and server.
+#        Example:     "68996,80001"
+#        Default:     "" - none
+#
+
+TwoForms.ToggleSpell = ""
+
+#
+#    TwoForms.NativeFormSpells
+#        Description: Comma-separated spells that return a player in the altered form to the race's own
+#                     form (Darkflight, Running Wild).
+#        Default:     "" - none
+#
+
+TwoForms.NativeFormSpells = ""
+
+#
+#    TwoForms.NativeFormInCombat
+#        Description: Entering combat returns a player in the altered form to the race's own form
+#                     (a Worgen fights as a wolf, as on retail).
+#        Default:     1 - Enabled
+#
+
+TwoForms.NativeFormInCombat = 1
+
+#
+#    TwoForms.NativeFormInCombatRaces
+#        Description: Comma-separated races that TwoForms.NativeFormInCombat applies to. Dracthyr keep
+#                     their Visage in combat, as on retail outside the Evoker class.
+#        Default:     "16" - Worgen
+#
+
+TwoForms.NativeFormInCombatRaces = "16"
+
+#
+#    TwoForms.RaceSpells
+#        Description: Comma-separated race:spell pairs; a player of the race is taught the spell (its
+#                     form toggle) at login if it doesn't know it yet.
+#        Example:     "16:68996,20:372014,21:372014"
+#        Default:     "" - none
+#
+
+TwoForms.RaceSpells = ""
