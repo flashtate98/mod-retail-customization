@@ -141,8 +141,28 @@ namespace
     // Playerbots: the choices a race, sex and class may take, by option (retail_customization_bot_pool).
     bool s_botLooks = true;
     std::string s_botAccountPrefix = "RNDBOT";
-    using Pool = std::vector<std::pair<uint32, std::vector<uint32>>>;
+    constexpr uint32 kStockOption = 0xFFFFFF10;        // pool rows for the 3.3.5 selectors: kStockOption + 0-4
+    struct Pool
+    {
+        std::vector<std::pair<uint32, std::vector<uint32>>> options;   // Retail option -> its choices
+        std::vector<uint8> stock[5];    // the values skin, face, hair style, hair colour and facial hair may take
+    };
     std::unordered_map<uint32, Pool> s_botPool;
+    uint32 s_botAlteredChance = 50;                         // percent of Two Forms bots that start in the altered form
+    bool s_botReturnAfterCombat = true;
+    std::set<ObjectGuid::LowType> s_botsBackToAltered;      // bots that left their altered form for a fight
+
+    // The race a race's altered form is drawn as (the client's AlteredFormRace): its pool rows are under that race.
+    uint32 FormRaceOf(uint32 race)
+    {
+        switch (race)
+        {
+            case 16: return 54;     // Worgen -> Gilnean
+            case 20:
+            case 21: return 55;     // Dracthyr -> Visage
+            default: return 0;
+        }
+    }
     std::unordered_map<uint32, bool> s_botAccounts;          // account -> is a random bot account
 
     uint32 PoolKey(uint32 race, uint32 sex, uint32 cls)
@@ -238,7 +258,7 @@ namespace
             auto const pool = s_botPool.find(PoolKey(player->getRace(), player->getGender(), player->getClass()));
             if (pool == s_botPool.end())
                 return;
-            for (auto const& [option, list] : pool->second)
+            for (auto const& [option, list] : pool->second.options)
                 if (!list.empty())
                     choices[option] = list[urand(0, uint32(list.size() - 1))];
         }
@@ -248,6 +268,51 @@ namespace
         WorldPacket data = ChoicesPacket(low, choices);
         player->SendMessageToSet(&data, true);
         LOG_DEBUG("module", "Retail customization: bot {} given {} choices", player->GetName(), choices.size());
+    }
+
+    // Two Forms: writes a character's other form's look (and the form it shows) to the database.
+    void SaveForms(ObjectGuid::LowType low, Forms const& forms)
+    {
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        trans->Append("REPLACE INTO `character_two_forms` (`guid`, `form`, `skin`, `face`, `hair_style`, `hair_color`, `facial_hair`) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {})", low, forms.form, forms.parked[0], forms.parked[1], forms.parked[2], forms.parked[3], forms.parked[4]);
+        trans->Append("DELETE FROM `character_two_forms_choices` WHERE `guid` = {}", low);
+        for (auto const& [option, choice] : forms.parkedChoices)
+            trans->Append("INSERT INTO `character_two_forms_choices` (`guid`, `option_id`, `choice_id`) VALUES ({}, {}, {})", low, option, choice);
+        CharacterDatabase.CommitTransaction(trans);
+    }
+
+    bool ChangeForm(Player* player, bool toNative);
+
+    // Playerbots, Two Forms: a random bot of a race with an altered form and no other form yet gets a random look for
+    // it (from the pool rows of the form's race), then starts in either form (TwoForms.BotAlteredChance).
+    void RollBotForms(Player* player)
+    {
+        if (!s_botLooks || !AlteredFormRace(player->getRace()) || !IsRandomBot(player))
+            return;
+        uint32 const formRace = FormRaceOf(player->getRace());
+        ObjectGuid::LowType const low = player->GetGUID().GetCounter();
+        Forms forms;
+        {
+            std::lock_guard<std::mutex> lock(s_mutex);
+            if (!formRace || s_forms.count(low))
+                return;
+            auto const pool = s_botPool.find(PoolKey(formRace, player->getGender(), player->getClass()));
+            if (pool == s_botPool.end())
+                return;
+            forms.account = player->GetSession()->GetAccountId();
+            for (uint8 i = 0; i < 5; ++i)
+                if (!pool->second.stock[i].empty())
+                    forms.parked[i] = pool->second.stock[i][urand(0, uint32(pool->second.stock[i].size() - 1))];
+            for (auto const& [option, list] : pool->second.options)
+                if (!list.empty())
+                    forms.parkedChoices[option] = list[urand(0, uint32(list.size() - 1))];
+            s_forms[low] = forms;
+        }
+        SaveForms(low, forms);
+        LOG_DEBUG("module", "Two Forms: bot {} given its other form's look", player->GetName());
+        if (urand(1, 100) <= s_botAlteredChance)
+            ChangeForm(player, false);
     }
 
     // All stored choices of the account's characters, and the form of those in their altered form, for the
@@ -338,7 +403,10 @@ namespace
 
         WorldPacket data = ChoicesPacket(low, active, form);
         player->SendMessageToSet(&data, true);
-        LOG_INFO("module", "Two Forms: {} is now in {} form", player->GetName(), form ? "its altered" : "its own");
+        if (IsRandomBot(player))    // bots change form around every fight: keep them out of the normal log
+            LOG_DEBUG("module", "Two Forms: bot {} is now in {} form", player->GetName(), form ? "its altered" : "its own");
+        else
+            LOG_INFO("module", "Two Forms: {} is now in {} form", player->GetName(), form ? "its altered" : "its own");
         return true;
     }
 
@@ -450,6 +518,8 @@ public:
     {
         s_enabled = sConfigMgr->GetOption<bool>("RetailCustomization.Enable", true);
         s_botLooks = sConfigMgr->GetOption<bool>("RetailCustomization.BotLooks", true);
+        s_botAlteredChance = std::min<uint32>(sConfigMgr->GetOption<uint32>("TwoForms.BotAlteredChance", 50), 100);
+        s_botReturnAfterCombat = sConfigMgr->GetOption<bool>("TwoForms.BotReturnAfterCombat", true);
         {
             std::lock_guard<std::mutex> lock(s_mutex);
             s_botAccountPrefix = sConfigMgr->GetOption<std::string>("RetailCustomization.BotAccountPrefix", "RNDBOT");
@@ -546,9 +616,18 @@ public:
                 Field* fields = result->Fetch();
                 Pool& pool = s_botPool[PoolKey(fields[0].Get<uint8>(), fields[1].Get<uint8>(), fields[2].Get<uint8>())];
                 uint32 const option = fields[3].Get<uint32>();
-                if (pool.empty() || pool.back().first != option)
-                    pool.emplace_back(option, std::vector<uint32>());
-                pool.back().second.push_back(fields[4].Get<uint32>());
+                uint32 const choice = fields[4].Get<uint32>();
+                if (option >= kStockOption && option < kStockOption + 5)
+                {
+                    if (choice < 256)
+                        pool.stock[option - kStockOption].push_back(uint8(choice));
+                }
+                else
+                {
+                    if (pool.options.empty() || pool.options.back().first != option)
+                        pool.options.emplace_back(option, std::vector<uint32>());
+                    pool.options.back().second.push_back(choice);
+                }
                 ++rows;
             } while (result->NextRow());
         }
@@ -622,14 +701,33 @@ class RetailCustomizationPlayer : public PlayerScript
 {
 public:
     RetailCustomizationPlayer() : PlayerScript("RetailCustomizationPlayer", { PLAYERHOOK_ON_CREATE, PLAYERHOOK_ON_DELETE,
-        PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_SPELL_CAST, PLAYERHOOK_ON_PLAYER_ENTER_COMBAT }) { }
+        PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_SPELL_CAST, PLAYERHOOK_ON_PLAYER_ENTER_COMBAT, PLAYERHOOK_ON_PLAYER_LEAVE_COMBAT }) { }
 
     // Two Forms: entering combat returns a player to the race's own form (a Worgen fights as a wolf).
     void OnPlayerEnterCombat(Player* player, Unit* /*enemy*/) override
     {
         if (s_enabled && s_nativeFormInCombat && s_nativeFormInCombatRaces.count(player->getRace()) &&
-            player->HasFlag(UNIT_FIELD_FLAGS_2, UNIT_FLAG2_ALTERED_FORM))
-            ChangeForm(player, true);
+            player->HasFlag(UNIT_FIELD_FLAGS_2, UNIT_FLAG2_ALTERED_FORM) && ChangeForm(player, true) &&
+            s_botReturnAfterCombat && IsRandomBot(player))
+        {
+            std::lock_guard<std::mutex> lock(s_mutex);
+            s_botsBackToAltered.insert(player->GetGUID().GetCounter());
+        }
+    }
+
+    // Playerbots, Two Forms: a random bot the fight sent to its own form goes back to its altered form afterwards, as a
+    // player would.
+    void OnPlayerLeaveCombat(Player* player) override
+    {
+        if (!s_enabled || !player)
+            return;
+        {
+            std::lock_guard<std::mutex> lock(s_mutex);
+            if (!s_botsBackToAltered.erase(player->GetGUID().GetCounter()))
+                return;
+        }
+        if (player->IsAlive() && !player->HasFlag(UNIT_FIELD_FLAGS_2, UNIT_FLAG2_ALTERED_FORM))
+            ChangeForm(player, false);
     }
 
     // Two Forms: a new character keeps the other form's look from the create screen; it starts in its own form.
@@ -647,14 +745,7 @@ public:
                 return;
             s_forms[player->GetGUID().GetCounter()] = forms;
         }
-        ObjectGuid::LowType const low = player->GetGUID().GetCounter();
-        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-        trans->Append("REPLACE INTO `character_two_forms` (`guid`, `form`, `skin`, `face`, `hair_style`, `hair_color`, `facial_hair`) "
-            "VALUES ({}, 0, {}, {}, {}, {}, {})", low, forms.parked[0], forms.parked[1], forms.parked[2], forms.parked[3], forms.parked[4]);
-        trans->Append("DELETE FROM `character_two_forms_choices` WHERE `guid` = {}", low);
-        for (auto const& [option, choice] : forms.parkedChoices)
-            trans->Append("INSERT INTO `character_two_forms_choices` (`guid`, `option_id`, `choice_id`) VALUES ({}, {}, {})", low, option, choice);
-        CharacterDatabase.CommitTransaction(trans);
+        SaveForms(player->GetGUID().GetCounter(), forms);
         LOG_INFO("module", "Two Forms: {} saved with its other form's look", player->GetName());
     }
 
@@ -667,6 +758,7 @@ public:
         RollBotLook(player);
         if (!AlteredFormRace(player->getRace()))
             return;
+        RollBotForms(player);
         auto const known = s_raceFormSpells.find(player->getRace());
         if (known != s_raceFormSpells.end() && !player->HasSpell(known->second) && sSpellMgr->GetSpellInfo(known->second))
             player->learnSpell(known->second);
@@ -730,6 +822,7 @@ public:
             s_stored.erase(guid.GetCounter());
             s_pendingBarber.erase(guid.GetCounter());
             s_forms.erase(guid.GetCounter());
+            s_botsBackToAltered.erase(guid.GetCounter());
         }
         CharacterDatabase.Execute("DELETE FROM `character_retail_customization` WHERE `guid` = {}", guid.GetCounter());
         CharacterDatabase.Execute("DELETE FROM `character_two_forms` WHERE `guid` = {}", guid.GetCounter());

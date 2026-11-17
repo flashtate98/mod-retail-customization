@@ -81,3 +81,21 @@ TwoForms.NativeFormInCombatRaces = "16"
 #
 
 TwoForms.RaceSpells = ""
+
+#
+#    TwoForms.BotAlteredChance
+#        Description: Percent of random playerbots of a Two Forms race that start in their altered form
+#                     (Gilnean, Visage) when they get their looks (RetailCustomization.BotLooks).
+#        Default:     50
+#
+
+TwoForms.BotAlteredChance = 50
+
+#
+#    TwoForms.BotReturnAfterCombat
+#        Description: A random playerbot that a fight sent back to its own form (TwoForms.NativeFormInCombat)
+#                     returns to its altered form when the fight ends.
+#        Default:     1 - Enabled
+#
+
+TwoForms.BotReturnAfterCombat = 1

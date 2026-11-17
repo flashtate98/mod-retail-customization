@@ -40,7 +40,10 @@ console, run `retailBotLooks`, and run the `Logs\retail_customization_bot_pool.s
 database. Run it again after changing the customization DB2s or the race map. The worldserver logs
 `>> Retail customization: N bot choices for M race, sex and class combinations loaded` at startup.
 
-Only the form a bot shows gets a look; a Worgen or Dracthyr bot's other form keeps its defaults.
+A Worgen or Dracthyr bot also gets a random look for its other form (Gilnean, Visage), from the pool rows of
+that form's race (54, 55), and starts in either form (`TwoForms.BotAlteredChance`). A Worgen bot that a fight
+turns back into a wolf returns to its Gilnean form afterwards (`TwoForms.BotReturnAfterCombat`). The pool
+carries the values each 3.3.5 selector may take too (options 0xFFFFFF10-0xFFFFFF14), for that other form.
 
 ## Two Forms (FlashWOW)
 
